@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Meta Suite ChatGPT Bridge",
+  "version": "1.0",
+  "description": "Extracts questions from Meta Business Suite and gets answers from ChatGPT.",
+  "permissions": ["storage", "activeTab", "scripting", "tabs"],
+  "host_permissions": ["https://business.facebook.com/*", "https://*.meta.com/*", "https://chatgpt.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://business.facebook.com/latest/inbox/*", "https://*.meta.com/business/inbox/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["chatgpt-interactor.js"],
+      "matches": ["https://chat.openai.com/*", "https://chatgpt.com/*"]
+    }
+  ]
+}
