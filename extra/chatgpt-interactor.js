@@ -119,136 +119,176 @@ async function submitQuestionToChatGPT(question) {
 
       console.log("ChatGPT Interactor: Proceeding to attempt submission.");
 
-      // --- Step 3: Attempt to submit using the specific button first ---
-      const specificSendButtonSelector = "button#composer-submit-button[data-testid='send-button']";
-      let sendButton = document.querySelector(specificSendButtonSelector);
+      // --- Step 3: Attempt to submit ---
+      let submissionSuccessful = false;
+      const potentialSendButtonSelectors = [
+        "button#composer-submit-button[data-testid='send-button']", // Most specific
+        "button[data-testid='send-button']",
+        "button[aria-label*='Send']", // More generic
+        "button[aria-label*='Submit']",
+        // Add other selectors if new UIs emerge, e.g., based on SVG path or parent structure
+        "form button[type='submit']", // A common pattern
+      ];
 
-      if (sendButton && !sendButton.disabled) {
-        console.log("ChatGPT Interactor: Specific send button (composer-submit-button) found and enabled. Clicking it.", sendButton);
-        sendButton.click();
-      } else {
-        if (sendButton && sendButton.disabled) {
-          console.log("ChatGPT Interactor: Specific send button (composer-submit-button) found but is DISABLED. Will try Enter key.");
-        } else {
-          console.log("ChatGPT Interactor: Specific send button (composer-submit-button) NOT FOUND. Will try Enter key.");
+      // Try clicking a send button first
+      for (const selector of potentialSendButtonSelectors) {
+        const button = document.querySelector(selector);
+        if (button && !button.disabled) {
+          console.log(`ChatGPT Interactor: Found enabled send button with selector "${selector}". Clicking it.`, button);
+          button.click();
+          submissionSuccessful = true;
+          break;
         }
+      }
 
-        console.log("ChatGPT Interactor: Simulating Enter key press.");
+      if (!submissionSuccessful) {
+        console.log("ChatGPT Interactor: No enabled send button found directly. Attempting Enter key simulation.");
         inputField.focus(); // Ensure focus
         inputField.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+        await new Promise((r) => setTimeout(r, 750)); // Wait a bit longer for Enter to process
 
-        await new Promise((r) => setTimeout(r, 500)); // Wait for submission to process
+        // Check if input field was cleared or changed significantly
+        // This check is a heuristic. Some UIs might not clear it immediately or fully.
+        const currentTextAfterEnter = inputField.isContentEditable ? inputField.textContent.trim() : inputField.value.trim();
+        const questionTrimmed = question.trim();
 
-        const currentInputValue = inputField.isContentEditable ? inputField.textContent.trim() : inputField.value.trim();
-        // Check if input field still contains the question or if it was appended (ProseMirror might append <p><br></p>)
-        if (currentInputValue === question.trim() || (inputField.isContentEditable && inputField.innerHTML.includes(question.replace(/\n/g, "</p><p>")))) {
-          console.warn("ChatGPT Interactor: Input field still contains the question after Enter simulation. Submission might have failed.");
-          sendButton = document.querySelector(specificSendButtonSelector);
-          if (sendButton && !sendButton.disabled) {
-            console.log("ChatGPT Interactor: Retrying click on specific send button as Enter might have failed.", sendButton);
-            sendButton.click();
-          } else {
-            throw new Error("ChatGPT submission failed. Input not cleared after Enter and specific send button is not available/enabled.");
+        // If input still seems to contain the original question, the Enter key might not have worked.
+        // Or, the UI might keep the text and disable the input/button.
+        // A more reliable check is if a new turn starts or if the send button becomes disabled *after* a short while.
+        // For now, we'll assume Enter *might* have worked and proceed, but log if text is still there.
+        if (currentTextAfterEnter === questionTrimmed && questionTrimmed !== "") {
+          // Don't flag if question was empty
+          console.warn(
+            "ChatGPT Interactor: Input field still contains the question after Enter simulation. Submission might be pending or failed. Will try to click button again if available."
+          );
+        } else if (questionTrimmed !== "" && currentTextAfterEnter !== "") {
+          console.log("ChatGPT Interactor: Input field content changed or cleared after Enter. Assuming submission initiated.");
+          submissionSuccessful = true; // Assume Enter worked if text changed or cleared
+        } else if (questionTrimmed === "" && currentTextAfterEnter === "") {
+          console.log("ChatGPT Interactor: Empty question submitted via Enter (assumed).");
+          submissionSuccessful = true;
+        } else {
+          // If question was not empty, but input is now empty, it's a good sign.
+          submissionSuccessful = true;
+          console.log("ChatGPT Interactor: Input field cleared after Enter. Assuming submission successful.");
+        }
+
+        // If Enter key *seemed* to fail (text didn't clear and was not empty), try clicking any send button again.
+        // This handles cases where Enter enables a button that was previously disabled.
+        if (currentTextAfterEnter === questionTrimmed && questionTrimmed !== "") {
+          console.log("ChatGPT Interactor: Enter might not have submitted. Trying to click a send button again.");
+          submissionSuccessful = false; // Reset as Enter was inconclusive
+          for (const selector of potentialSendButtonSelectors) {
+            const button = document.querySelector(selector);
+            // Check if button is now enabled (it might have been disabled before Enter)
+            if (button && !button.disabled) {
+              console.log(`ChatGPT Interactor: Found enabled send button (after Enter attempt) with selector "${selector}". Clicking it.`, button);
+              button.click();
+              submissionSuccessful = true;
+              break;
+            }
           }
         }
       }
-      console.log("ChatGPT Interactor: Question submission attempted.");
 
-      // --- Step 4: Wait for and extract the response ---
-      console.log("ChatGPT Interactor: Waiting for ChatGPT's response to appear...");
-      // Updated selector based on provided HTML for conversation turns
+      if (!submissionSuccessful) {
+        // Final check: if after all attempts, the input field for a non-empty question still contains the exact question,
+        // and no button click was registered as successful, then it's likely a failure.
+        const finalTextInBox = inputField.isContentEditable ? inputField.textContent.trim() : inputField.value.trim();
+        if (finalTextInBox === question.trim() && question.trim() !== "") {
+          // Check if any send button is present and disabled (indicates waiting for response)
+          let sendButtonStillDisabled = false;
+          for (const selector of potentialSendButtonSelectors) {
+            const button = document.querySelector(selector);
+            if (button && button.disabled) {
+              sendButtonStillDisabled = true;
+              console.log("ChatGPT Interactor: A send button is present and disabled. Assuming submission is processing despite text not clearing.");
+              submissionSuccessful = true; // Override: assume it's processing
+              break;
+            }
+          }
+          if (!submissionSuccessful) {
+            // Only throw if no button is disabled (meaning UI isn't in a typical sending state)
+            throw new Error("ChatGPT submission failed. Input not cleared after all attempts and no send button indicates processing.");
+          }
+        } else if (finalTextInBox !== question.trim()) {
+          // If text is different, assume submission worked or is in progress
+          console.log("ChatGPT Interactor: Text in input box is different from original question. Assuming submission is okay.");
+          submissionSuccessful = true;
+        } else {
+          // If question was empty and input is empty, or some other unhandled state
+          console.log("ChatGPT Interactor: Assuming submission is okay by default if no explicit failure detected.");
+          submissionSuccessful = true;
+        }
+      }
+
+      console.log("ChatGPT Interactor: Question submission process completed. Assumed success:", submissionSuccessful);
+
+      // --- Step 4: Wait for a fixed 8 seconds then extract the response ---
+      console.log("ChatGPT Interactor: Waiting 8 seconds for ChatGPT's response to generate...");
+      await new Promise((r) => setTimeout(r, 8000));
+
+      console.log("ChatGPT Interactor: Attempting to extract response after 8-second wait.");
       const turnSelector = "article[data-testid^='conversation-turn-']";
-      // Specific selector for the assistant's message text container
-      const assistantMessageTextSelector = "div[data-message-author-role='assistant'] div.markdown";
-
+      const allTurns = Array.from(document.querySelectorAll(turnSelector));
       let lastValidResponseText = "";
-      const startTime = Date.now();
-      let initialTurnCount = document.querySelectorAll(turnSelector).length;
-      console.log(`ChatGPT Interactor: Initial turn count on page: ${initialTurnCount}`);
 
-      while (Date.now() - startTime < 60000) {
-        // Max 60 seconds wait
-        const allTurns = Array.from(document.querySelectorAll(turnSelector));
+      if (allTurns.length > 0) {
+        const latestTurnElement = allTurns[allTurns.length - 1]; // Get the very last turn
+        const assistantMessageContainer = latestTurnElement.querySelector("div[data-message-author-role='assistant']");
 
-        if (allTurns.length > initialTurnCount) {
-          // A new turn has appeared
-          const latestTurnElement = allTurns[allTurns.length - 1];
-
-          // Check if this latest turn is from the assistant
-          const assistantMessageContainer = latestTurnElement.querySelector("div[data-message-author-role='assistant']");
-
-          if (assistantMessageContainer) {
-            console.log("ChatGPT Interactor: Found a new turn from assistant.", latestTurnElement);
-
-            // Check for "stop generating" button to know if response is still streaming
-            const stopGeneratingButton = latestTurnElement.querySelector("button[aria-label*='Stop generating'], button[data-testid*='stop-generating']");
-            const regenButton = latestTurnElement.querySelector("button[aria-label*='Regenerate'], button[data-testid*='regenerate']");
-
-            if (!stopGeneratingButton || regenButton) {
-              // If no stop button, or regen button is present, assume generation is complete or nearly complete
-              console.log("ChatGPT Interactor: Response generation appears complete (no stop button or regen button found).");
-
-              // Extract text from the markdown div
-              const markdownDiv = assistantMessageContainer.querySelector("div.markdown");
-              if (markdownDiv) {
-                let extractedText = "";
-                // The text is often in <p> tags within the markdown div
-                const paragraphs = markdownDiv.querySelectorAll("p");
-                if (paragraphs.length > 0) {
-                  paragraphs.forEach((p) => (extractedText += p.innerText.trim() + "\n"));
-                } else {
-                  // Fallback if no <p> tags, try direct innerText of markdown div
-                  extractedText = markdownDiv.innerText.trim();
-                }
-
-                if (extractedText.trim()) {
-                  lastValidResponseText = extractedText.trim();
-                  console.log("ChatGPT Interactor: Extracted final response text:", lastValidResponseText);
-                  break; // Exit loop once a valid response is extracted
-                } else {
-                  console.log("ChatGPT Interactor: Markdown div found, but extracted text is empty. Waiting for content...");
-                }
-              } else {
-                console.log("ChatGPT Interactor: Assistant message container found, but 'div.markdown' not found within it. Structure might have changed.");
-              }
+        if (assistantMessageContainer) {
+          const markdownDiv = assistantMessageContainer.querySelector("div.markdown");
+          if (markdownDiv) {
+            let extractedText = "";
+            const paragraphs = markdownDiv.querySelectorAll("p");
+            if (paragraphs.length > 0) {
+              paragraphs.forEach((p) => (extractedText += p.innerText.trim() + "\n"));
             } else {
-              console.log("ChatGPT Interactor: Response is still generating (stop button found). Waiting...");
+              extractedText = markdownDiv.innerText.trim(); // Fallback if no <p> tags
             }
+            lastValidResponseText = extractedText.trim();
+            console.log("ChatGPT Interactor: Extracted response text:", lastValidResponseText);
+          } else {
+            console.warn("ChatGPT Interactor: Assistant message container found, but 'div.markdown' not found within it after wait.");
           }
+        } else {
+          console.warn("ChatGPT Interactor: No assistant message container found in the latest turn after wait.");
         }
-        await new Promise((r) => setTimeout(r, 1000)); // Check every 1 second
+      } else {
+        console.warn("ChatGPT Interactor: No conversation turns found on the page after wait.");
       }
 
       if (!lastValidResponseText) {
-        // Check one last time without the streaming assumption if timeout occurred
-        const allTurnsFinal = Array.from(document.querySelectorAll(turnSelector));
-        if (allTurnsFinal.length > initialTurnCount) {
-          const latestTurnElementFinal = allTurnsFinal[allTurnsFinal.length - 1];
-          const assistantMessageContainerFinal = latestTurnElementFinal.querySelector("div[data-message-author-role='assistant']");
-          if (assistantMessageContainerFinal) {
-            const markdownDivFinal = assistantMessageContainerFinal.querySelector("div.markdown");
-            if (markdownDivFinal) {
-              let extractedTextFinal = "";
-              const paragraphsFinal = markdownDivFinal.querySelectorAll("p");
-              if (paragraphsFinal.length > 0) {
-                paragraphsFinal.forEach((p) => (extractedTextFinal += p.innerText.trim() + "\n"));
-              } else {
-                extractedTextFinal = markdownDivFinal.innerText.trim();
-              }
-              if (extractedTextFinal.trim()) {
-                lastValidResponseText = extractedTextFinal.trim();
-                console.log("ChatGPT Interactor: Extracted response text on final check:", lastValidResponseText);
-              }
-            }
+        // Try to find any assistant message on the page as a last resort
+        const anyAssistantMessage = document.querySelector("div[data-message-author-role='assistant'] div.markdown");
+        if (anyAssistantMessage) {
+          console.warn("ChatGPT Interactor: No specific last turn, trying any assistant message.");
+          let extractedText = "";
+          const paragraphs = anyAssistantMessage.querySelectorAll("p");
+          if (paragraphs.length > 0) {
+            paragraphs.forEach((p) => (extractedText += p.innerText.trim() + "\n"));
+          } else {
+            extractedText = anyAssistantMessage.innerText.trim();
           }
+          lastValidResponseText = extractedText.trim();
+          console.log("ChatGPT Interactor: Extracted from any assistant message:", lastValidResponseText);
         }
       }
 
       if (!lastValidResponseText) {
-        throw new Error("ChatGPT response text did not appear or complete in time, or could not be extracted.");
+        // If still no text, it's possible the response is "NOTFOUND" or an error message directly in the UI
+        // Check for common ChatGPT error/message patterns if necessary, or just send empty/error
+        console.warn("ChatGPT Interactor: Response text is empty after 8-second wait and fallbacks.");
+        // Consider if "NOTFOUND" should be explicitly looked for here if it's a UI text
+        // For now, an empty string will be sent, or an error if it's truly an issue.
+        // If the user types "NOTFOUND" as a valid response, this logic is fine.
+        // If "NOTFOUND" is a special instruction from the prompt, content.js handles it.
       }
 
-      console.log("ChatGPT Interactor: Final response to send back:", lastValidResponseText);
+      // Resolve with whatever was found, even if it's an empty string.
+      // background.js or content.js can decide what to do with an empty or "NOTFOUND" string.
+      console.log("ChatGPT Interactor: Final response to send back (after 8s wait):", lastValidResponseText);
       resolve(lastValidResponseText);
     } catch (err) {
       console.error("ChatGPT Interactor: Error in submitQuestionToChatGPT:", err);

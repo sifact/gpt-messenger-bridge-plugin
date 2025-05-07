@@ -12,26 +12,53 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     handleOpenConversationAndRespond(request, sender, sendResponse);
     return true; // Indicates an asynchronous response.
   } else if (request.action === "getSettings") {
-    chrome.storage.sync.get(["isEnabled", "customResponsePrefix"], (settings) => {
+    chrome.storage.sync.get(["isEnabled", "isPartialAutomation"], (settings) => {
       if (chrome.runtime.lastError) {
         console.error("Background: Error getting settings:", chrome.runtime.lastError.message);
         sendResponse({ error: chrome.runtime.lastError.message });
       } else {
+        // Set default values if settings are undefined
+        if (settings.isEnabled === undefined) {
+          console.log("Background: isEnabled setting not found, using default value: false");
+          settings.isEnabled = false;
+        }
+
+        if (settings.isPartialAutomation === undefined) {
+          console.log("Background: isPartialAutomation setting not found, using default value: false");
+          settings.isPartialAutomation = false;
+        }
+
+        // We no longer use a static prefix - the customer name will be dynamically added in content.js
+        settings.customResponsePrefix = "";
+
+        console.log("Background: Returning settings:", settings);
         sendResponse(settings);
       }
     });
     return true;
   } else if (request.action === "saveSettings") {
-    chrome.storage.sync.set(request.settings, () => {
-      if (chrome.runtime.lastError) {
-        console.error("Background: Error saving settings:", chrome.runtime.lastError.message);
-        sendResponse({ error: chrome.runtime.lastError.message });
-      } else {
-        console.log("Background: Settings saved", request.settings);
-        sendResponse({ status: "Settings saved" });
-        notifyContentScriptsSettingsUpdated();
+    // Save both isEnabled and isPartialAutomation settings
+    console.log("Background: Saving settings received from popup:", request.settings);
+    chrome.storage.sync.set(
+      {
+        isEnabled: request.settings.isEnabled === true,
+        isPartialAutomation: request.settings.isPartialAutomation === true,
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          console.error("Background: Error saving settings:", chrome.runtime.lastError.message);
+          sendResponse({ error: chrome.runtime.lastError.message });
+        } else {
+          console.log("Background: Settings successfully saved:", request.settings);
+          // Verify what was actually saved
+          chrome.storage.sync.get(["isEnabled", "isPartialAutomation"], (verifySettings) => {
+            console.log("Background: Verification - settings after save:", verifySettings);
+          });
+          sendResponse({ status: "Settings saved" });
+          notifyContentScriptsSettingsUpdated();
+        }
       }
-    });
+    );
     return true;
   } else if (request.action === "chatGPTResponse") {
     // Message from chatgpt-interactor.js
@@ -55,6 +82,53 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // --- Action Handlers ---
 
 let activeChatGPTResolver = null; // To store the resolve/reject functions of the current ChatGPT request promise
+let processedQuestions = new Map(); // To track recently processed questions and avoid duplicates
+
+// Create a hash from the full question text
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash << 5) - hash + str.charCodeAt(i);
+    hash |= 0; // Convert to 32bit integer
+  }
+  return Math.abs(hash).toString();
+}
+
+// This will help prevent multiple responses for the same question by the same user
+function trackProcessedQuestion(question, conversationId) {
+  // Use full conversation ID and question hash to ensure uniqueness
+  const questionHash = hashString(question);
+  const key = `${conversationId}:${questionHash}`;
+  const now = Date.now();
+
+  console.log(`Background: Tracking question - Key: ${key}, Time: ${new Date(now).toLocaleTimeString()}`);
+  processedQuestions.set(key, now);
+
+  // Clean up old entries (older than 3 minutes for testing, adjust as needed)
+  const purgeTime = 3 * 60 * 1000; // 3 minutes
+  for (const [storedKey, timestamp] of processedQuestions.entries()) {
+    if (now - timestamp > purgeTime) {
+      console.log(`Background: Removing stale question tracking - Key: ${storedKey}, Age: ${(now - timestamp) / 1000}s`);
+      processedQuestions.delete(storedKey);
+    }
+  }
+}
+
+function isQuestionAlreadyProcessed(question, conversationId) {
+  const questionHash = hashString(question);
+  const key = `${conversationId}:${questionHash}`;
+  const isProcessed = processedQuestions.has(key);
+
+  if (isProcessed) {
+    console.log(`Background: Detected duplicate question - Key: ${key}`);
+    // Get timestamp of when it was processed
+    const timestamp = processedQuestions.get(key);
+    const secondsAgo = (Date.now() - timestamp) / 1000;
+    console.log(`Background: Original question was processed ${secondsAgo.toFixed(1)} seconds ago`);
+  }
+
+  return isProcessed;
+}
 
 async function fetchChatGPTAnswer(question) {
   console.log("Background: Attempting to fetch answer from ChatGPT web UI for:", question);
@@ -69,11 +143,12 @@ async function fetchChatGPTAnswer(question) {
     let chatGPTTab = null;
     try {
       // Check if a ChatGPT tab is already open
-      const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+      const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" }); // CORRECTED URL
       if (tabs.length > 0) {
         chatGPTTab = tabs[0];
-        // DO NOT activate the tab: await chrome.tabs.update(chatGPTTab.id, { active: true });
-        console.log("Background: Found existing ChatGPT tab:", chatGPTTab.id, "(will not activate it).");
+        // Temporarily re-activate the tab to see if it fixes response extraction
+        await chrome.tabs.update(chatGPTTab.id, { active: true });
+        console.log("Background: Found existing ChatGPT tab:", chatGPTTab.id, "(activating it for interaction).");
         // Ensure it's fully loaded before injecting scripts, even if it's an existing tab.
         await waitForTabLoad(chatGPTTab.id, 5000); // Wait up to 5s for existing tab to be ready
       } else {
@@ -167,8 +242,12 @@ async function waitForTabLoad(tabId, timeout = 10000) {
 
 async function handleGetAnswerFromChatGPT(request, sendResponse) {
   try {
+    // Process all questions without duplicate checking
     const answer = await fetchChatGPTAnswer(request.question);
-    console.log("Background: Sending answer to Meta content script:", answer);
+
+    // Truncate long answers in logs to keep console clean
+    console.log("Background: Sending answer to Meta content script:", answer.length > 50 ? answer.substring(0, 50) + "..." : answer);
+
     sendResponse({ answer: answer });
   } catch (error) {
     console.error("Background: Error getting answer from ChatGPT UI:", error);
@@ -249,10 +328,11 @@ function notifyContentScriptsSettingsUpdated() {
 chrome.runtime.onInstalled.addListener((details) => {
   if (details.reason === "install") {
     chrome.storage.sync.set({
-      isEnabled: true,
-      customResponsePrefix: "AI Assistant: ",
+      isEnabled: false, // Changed: Default to disabled as requested
+      isPartialAutomation: false, // Default to full automation
     });
-    console.log("Meta Suite ChatGPT Bridge installed. Default settings saved.");
+    console.log("Background: Default settings saved on install - isEnabled: false");
+    console.log("Meta Suite ChatGPT Bridge installed. Default settings saved. Automation is OFF by default.");
   } else if (details.reason === "update") {
     console.log("Meta Suite ChatGPT Bridge updated to version " + chrome.runtime.getManifest().version);
   }

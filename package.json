@@ -1,0 +1,16 @@
+{
+  "name": "meta-suite-chatgpt-bridge",
+  "version": "2.1.0",
+  "description": "Extracts questions from Meta Business Suite and gets answers from ChatGPT.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node build.js",
+    "watch": "nodemon --watch src --exec \"npm run build\"",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22",
+    "vite": "^4.5.0"
+  }
+}
