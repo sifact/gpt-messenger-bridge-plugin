@@ -1,34 +1,50 @@
 // chatgpt-interactor.js
 console.log("ChatGPT Interactor content script loaded.");
 
+// Simple tracking for the last processed question
 let lastProcessedQuestion = "";
+let lastProcessTime = 0;
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "askQuestion") {
     console.log("ChatGPT Interactor: Received question:", request.question);
+
+    // Check if this exact question was processed recently (within 5 seconds)
     if (request.question === lastProcessedQuestion && Date.now() - lastProcessTime < 5000) {
       console.warn("ChatGPT Interactor: Question is the same as last processed very recently. Skipping.");
       sendResponse({ status: "skipped_recent_duplicate" });
       return true;
     }
+
+    // Update tracking variables
     lastProcessedQuestion = request.question;
     lastProcessTime = Date.now();
 
     submitQuestionToChatGPT(request.question)
       .then((answer) => {
         console.log("ChatGPT Interactor: Sending answer back to background:", answer);
-        chrome.runtime.sendMessage({ action: "chatGPTResponse", answer: answer });
+        chrome.runtime.sendMessage({ action: "chatGPTResponse", answer: answer }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("ChatGPT Interactor: Error sending answer to background:", chrome.runtime.lastError.message);
+          } else {
+            console.log("ChatGPT Interactor: Background acknowledged answer:", response);
+          }
+        });
       })
       .catch((error) => {
         console.error("ChatGPT Interactor: Error processing question:", error);
-        chrome.runtime.sendMessage({ action: "chatGPTResponse", error: error.toString() });
+        chrome.runtime.sendMessage({ action: "chatGPTResponse", error: error.toString() }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("ChatGPT Interactor: Error sending error to background:", chrome.runtime.lastError.message);
+          } else {
+            console.log("ChatGPT Interactor: Background acknowledged error:", response);
+          }
+        });
       });
     sendResponse({ status: "processing" });
     return true;
   }
 });
-
-let lastProcessTime = 0;
 
 async function submitQuestionToChatGPT(question) {
   return new Promise(async (resolve, reject) => {
@@ -48,8 +64,6 @@ async function submitQuestionToChatGPT(question) {
         console.log("ChatGPT Interactor: Contenteditable input field found:", inputField);
       }
 
-      // --- Step 2: Set the question text with detailed logging ---
-      console.log("ChatGPT Interactor: Focusing input field...", inputField);
       inputField.focus();
 
       if (inputField.isContentEditable) {
@@ -64,37 +78,21 @@ async function submitQuestionToChatGPT(question) {
           console.log("ChatGPT Interactor: Setting formatted question:", formattedQuestion);
           inputField.innerHTML = formattedQuestion;
         }
-        console.log("ChatGPT Interactor: inputField.innerHTML AFTER direct set:", inputField.innerHTML);
 
-        console.log("ChatGPT Interactor: Dispatching 'input' event.");
         inputField.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        console.log("ChatGPT Interactor: inputField.innerHTML AFTER 'input' event:", inputField.innerHTML);
 
-        // The 'change' event is less standard for contenteditable but kept for now.
-        console.log("ChatGPT Interactor: Dispatching 'change' event.");
         inputField.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        console.log("ChatGPT Interactor: inputField.innerHTML AFTER 'change' event:", inputField.innerHTML);
       } else if (inputField.tagName === "TEXTAREA") {
-        console.log("ChatGPT Interactor: Setting value for TEXTAREA.");
         inputField.value = question;
-        console.log("ChatGPT Interactor: inputField.value AFTER direct set:", inputField.value);
         inputField.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        console.log("ChatGPT Interactor: inputField.value AFTER 'input' event:", inputField.value);
       } else {
-        // Fallback for other types
-        console.log("ChatGPT Interactor: Setting textContent for other input type.");
         inputField.textContent = question;
         inputField.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
       }
 
       // Re-focus just in case, and final log of what the DOM sees as text content
       inputField.focus();
-      console.log("ChatGPT Interactor: Final inputField.textContent after all setting attempts:", inputField.textContent);
-      console.log("ChatGPT Interactor: Final inputField.innerHTML after all setting attempts:", inputField.innerHTML);
 
-      // Verify text content
-      // For ProseMirror, the actual text might be in child <p> tags.
-      // We need to ensure the visible text matches the question.
       let currentTextInBox = "";
       if (inputField.isContentEditable) {
         const paragraphs = inputField.querySelectorAll("p");
@@ -107,17 +105,12 @@ async function submitQuestionToChatGPT(question) {
 
       if (currentTextInBox.trim() !== question.trim()) {
         console.error(`ChatGPT Interactor: CRITICAL - Text in box ("${currentTextInBox.trim()}") does not match question ("${question.trim()}"). Halting before submission.`);
-        // Optional: throw an error here if this is critical
-        // reject(new Error("Failed to reliably set text in ChatGPT input field."));
-        // return; // Stop further execution if text isn't set.
       } else {
         console.log("ChatGPT Interactor: Text successfully set and verified in input field.");
       }
 
       // Wait a bit longer for the UI to react, especially for the send button to enable
       await new Promise((r) => setTimeout(r, 300));
-
-      console.log("ChatGPT Interactor: Proceeding to attempt submission.");
 
       // --- Step 3: Attempt to submit ---
       let submissionSuccessful = false;
@@ -151,11 +144,6 @@ async function submitQuestionToChatGPT(question) {
         // This check is a heuristic. Some UIs might not clear it immediately or fully.
         const currentTextAfterEnter = inputField.isContentEditable ? inputField.textContent.trim() : inputField.value.trim();
         const questionTrimmed = question.trim();
-
-        // If input still seems to contain the original question, the Enter key might not have worked.
-        // Or, the UI might keep the text and disable the input/button.
-        // A more reliable check is if a new turn starts or if the send button becomes disabled *after* a short while.
-        // For now, we'll assume Enter *might* have worked and proceed, but log if text is still there.
         if (currentTextAfterEnter === questionTrimmed && questionTrimmed !== "") {
           // Don't flag if question was empty
           console.warn(
@@ -197,11 +185,9 @@ async function submitQuestionToChatGPT(question) {
         const finalTextInBox = inputField.isContentEditable ? inputField.textContent.trim() : inputField.value.trim();
         if (finalTextInBox === question.trim() && question.trim() !== "") {
           // Check if any send button is present and disabled (indicates waiting for response)
-          let sendButtonStillDisabled = false;
           for (const selector of potentialSendButtonSelectors) {
             const button = document.querySelector(selector);
             if (button && button.disabled) {
-              sendButtonStillDisabled = true;
               console.log("ChatGPT Interactor: A send button is present and disabled. Assuming submission is processing despite text not clearing.");
               submissionSuccessful = true; // Override: assume it's processing
               break;
@@ -222,11 +208,9 @@ async function submitQuestionToChatGPT(question) {
         }
       }
 
-      console.log("ChatGPT Interactor: Question submission process completed. Assumed success:", submissionSuccessful);
-
       // --- Step 4: Wait for a fixed 8 seconds then extract the response ---
       console.log("ChatGPT Interactor: Waiting 8 seconds for ChatGPT's response to generate...");
-      await new Promise((r) => setTimeout(r, 8000));
+      await new Promise((r) => setTimeout(r, 10000));
 
       console.log("ChatGPT Interactor: Attempting to extract response after 8-second wait.");
       const turnSelector = "article[data-testid^='conversation-turn-']";
@@ -277,17 +261,9 @@ async function submitQuestionToChatGPT(question) {
       }
 
       if (!lastValidResponseText) {
-        // If still no text, it's possible the response is "NOTFOUND" or an error message directly in the UI
-        // Check for common ChatGPT error/message patterns if necessary, or just send empty/error
         console.warn("ChatGPT Interactor: Response text is empty after 8-second wait and fallbacks.");
-        // Consider if "NOTFOUND" should be explicitly looked for here if it's a UI text
-        // For now, an empty string will be sent, or an error if it's truly an issue.
-        // If the user types "NOTFOUND" as a valid response, this logic is fine.
-        // If "NOTFOUND" is a special instruction from the prompt, content.js handles it.
       }
 
-      // Resolve with whatever was found, even if it's an empty string.
-      // background.js or content.js can decide what to do with an empty or "NOTFOUND" string.
       console.log("ChatGPT Interactor: Final response to send back (after 8s wait):", lastValidResponseText);
       resolve(lastValidResponseText);
     } catch (err) {

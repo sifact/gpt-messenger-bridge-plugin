@@ -3,6 +3,7 @@ import { handleGetAnswerFromChatGPT } from "./handlers.js";
 import { handleOpenConversationAndRespond } from "./handlers.js";
 import { notifyContentScriptsSettingsUpdated } from "./utils.js";
 import { resolverStore } from "./state.js";
+import { clearResolverStore } from "./chatgptService.js";
 
 console.log("Background service worker started.");
 
@@ -79,8 +80,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       } else {
         resolverStore.activeChatGPTResolver.reject(request.error || "Unknown error from ChatGPT interactor");
       }
-      resolverStore.activeChatGPTResolver = null; // Clear resolver
+
+      // Clear the resolver store
+      clearResolverStore();
+      console.log("Background: Cleared resolver store after processing response");
+    } else {
+      console.warn("Background: Received chatGPTResponse but no active resolver found. This may indicate a race condition.");
+      // Clear the resolver store anyway to ensure it's in a clean state
+      clearResolverStore();
     }
+
     sendResponse({ status: "Response noted by background" }); // Acknowledge message
     return true;
   }

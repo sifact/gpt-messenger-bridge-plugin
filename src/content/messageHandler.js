@@ -1,19 +1,27 @@
 // Functions for handling messages and sending them to the background script
-
-import { notFoundMessages } from "./messageExtractor.js";
-import { waitForElementOnPage } from "./utils.js";
+import { processedMessageStore } from "./messageExtractor.js";
+import { waitForElementOnPage, addNextButton, addProcessedMessage } from "./utils.js";
 import { runAutomationCycle } from "./automation.js";
+import { notFoundMessages, deliveryAttempts } from "./state.js";
 
 // Global state for response delivery
-let currentResponseToDeliver = null;
-let isAttemptingDelivery = false;
 const MAX_DELIVERY_RETRIES = 2;
+
+// Import isPartialChecking and setIsPartialChecking from automation.js
+import { setIsPartialChecking, getIsPartialChecking } from "./automation.js";
 
 // Send questions to the background script
 async function sendQuestionsToBackground(questions) {
   if (questions.length === 0) return;
 
   console.log(`Content.js: Processing ${questions.length} questions with delay between each`);
+
+  // Check if we're in partial mode and already have a response being delivered
+  // This is an additional safeguard to prevent multiple triggers
+  if (window.isPartialAutomationEnabled && !getIsPartialChecking()) {
+    console.log("Content.js: In partial mode with isPartialChecking=false. Skipping question processing to prevent multiple triggers.");
+    return;
+  }
 
   // Process only one question at a time with delay between each question
   for (let i = 0; i < questions.length; i++) {
@@ -33,7 +41,7 @@ async function sendQuestionsToBackground(questions) {
 
     try {
       if (notFoundMessages.has(stableMessageKey)) {
-        console.log(`Content.js: Skipping question for ${q.conversationId} as it previously resulted in "NOTFOUND": "${q.text}"`);
+        console.log(`Skipping as it previously resulted in "NOTFOUND"`);
         if (q.previewElement && q.previewElement.classList.contains("chatgpt-pending-response")) {
           q.previewElement.classList.remove("chatgpt-pending-response");
         }
@@ -49,9 +57,9 @@ async function sendQuestionsToBackground(questions) {
         console.log(`Content.js: Marked conversation ${q.conversationId} as 'chatgpt-pending-response'.`);
       }
 
-      const settings = await chrome.runtime.sendMessage({ action: "getSettings" });
+      // Check for runtime errors before proceeding
       if (chrome.runtime.lastError) {
-        console.error("Content.js: Error getting settings in sendQuestionsToBackground:", chrome.runtime.lastError.message);
+        console.error("Content.js: Error in sendQuestionsToBackground:", chrome.runtime.lastError.message);
         if (q.previewElement) q.previewElement.classList.remove("chatgpt-pending-response"); // Unmark on error
         continue;
       }
@@ -69,6 +77,7 @@ async function sendQuestionsToBackground(questions) {
         conversationId: q.conversationId,
         requestId: uniqueId, // Add request ID as separate parameter for tracking
       });
+      // this question is exists in processedMessageStore then return
 
       if (chrome.runtime.lastError) {
         console.error("Content.js: Error sending message to background (getAnswerFromChatGPT):", chrome.runtime.lastError.message);
@@ -82,18 +91,16 @@ async function sendQuestionsToBackground(questions) {
       if (response && response.answer) {
         console.log(`Content.js: Received answer for ${q.conversationId}: "${response.answer}"`);
 
-        if (response.answer === "NOTFOUND") {
-          // Use the correctly defined stableMessageKey
-          console.log(`Content.js: Response for ${q.conversationId} (key: "${stableMessageKey}") is "NOTFOUND". Adding to ignore list and skipping delivery.`);
-          console.log(`Content.js: Adding key "${stableMessageKey}" to notFoundMessages. Current size before add: ${notFoundMessages.size}`);
+        if (response.answer === "NOTFOUND" || response.answer.includes("NOTFOUND")) {
+          // NOTFOUND exists in the response.answer
           notFoundMessages.add(stableMessageKey);
 
           if (q.previewElement) {
             q.previewElement.classList.remove("chatgpt-pending-response");
             console.log(`Content.js: Unmarked ${q.conversationId} from pending due to "NOTFOUND".`);
           }
-          currentResponseToDeliver = null; // Ensure no delivery is attempted
-          isAttemptingDelivery = false; // Ensure delivery flag is reset
+          deliveryAttempts.currentResponseToDeliver = null; // Ensure no delivery is attempted
+          deliveryAttempts.isAttemptingDelivery = false; // Ensure delivery flag is reset
           continue; // Move to the next question, do not break or deliver.
         }
 
@@ -103,7 +110,7 @@ async function sendQuestionsToBackground(questions) {
           console.log(`Content.js: Unmarked ${q.conversationId} from pending, preparing for delivery.`);
         }
         // Ensure the context for currentResponseToDeliver is from the correct 'q' object
-        currentResponseToDeliver = {
+        deliveryAttempts.currentResponseToDeliver = {
           conversationId: q.conversationId, // from the current question object 'q'
           sender: q.sender, // from 'q'
           originalQuestionText: q.text, // from 'q'
@@ -111,16 +118,31 @@ async function sendQuestionsToBackground(questions) {
           originalPreviewElement: q.previewElement, // from 'q'
           retries: 0,
         };
-        console.log(
-          `Content.js: Staging response for delivery. Conv ID: ${currentResponseToDeliver.conversationId}, Sender: ${currentResponseToDeliver.sender}, Original Q: "${currentResponseToDeliver.originalQuestionText}", Answer: "${currentResponseToDeliver.answer}"`
-        );
+        // console.log(
+        //   `Content.js: Staging response for delivery. Conv ID: ${currentResponseToDeliver.conversationId}, Sender: ${currentResponseToDeliver.sender}, Original Q: "${currentResponseToDeliver.originalQuestionText}", Answer: "${currentResponseToDeliver.answer}"`
+        // );
         initiateResponseDeliverySequence();
         break; // IMPORTANT: Stop processing further questions, focus on delivering this one.
       } else if (response && response.error) {
         console.error(`Content.js: Error from background for question "${q.text}":`, response.error);
-        if (q.previewElement) {
-          q.previewElement.classList.remove("chatgpt-pending-response"); // Unmark on error from ChatGPT
-          console.log(`Content.js: Unmarked conversation ${q.conversationId} from 'chatgpt-pending-response' due to ChatGPT error: ${response.error}`);
+
+        // Check if this is the "Another ChatGPT request is already in progress" error
+        if (response.error.includes("Another ChatGPT request is already in progress")) {
+          console.log(`Content.js: Detected "Another ChatGPT request is already in progress" error for conversation ${q.conversationId}`);
+
+          // Set a timeout to remove the pending-response class after 10 seconds
+          setTimeout(() => {
+            if (q.previewElement && document.body.contains(q.previewElement)) {
+              q.previewElement.classList.remove("chatgpt-pending-response");
+              console.log(`Content.js: Removed 'chatgpt-pending-response' class from conversation ${q.conversationId} after timeout`);
+            }
+          }, 10000); // 10 second delay
+        } else {
+          // For other errors, remove the pending-response class immediately
+          if (q.previewElement) {
+            q.previewElement.classList.remove("chatgpt-pending-response"); // Unmark on error from ChatGPT
+            console.log(`Content.js: Unmarked conversation ${q.conversationId} from 'chatgpt-pending-response' due to ChatGPT error: ${response.error}`);
+          }
         }
       } else {
         console.log(`Content.js: No valid answer or error received from background for: "${q.text}"`);
@@ -141,31 +163,39 @@ async function sendQuestionsToBackground(questions) {
 
 // Function to initiate the response delivery sequence
 async function initiateResponseDeliverySequence() {
-  if (!currentResponseToDeliver) {
-    isAttemptingDelivery = false; // Ensure this is reset
+  if (!deliveryAttempts.currentResponseToDeliver) {
+    deliveryAttempts.isAttemptingDelivery = false; // Ensure this is reset
     return;
   }
-  if (isAttemptingDelivery) {
+  if (deliveryAttempts.isAttemptingDelivery) {
     // console.log("Content.js: Delivery attempt already in progress for another response.");
     return;
   }
 
-  isAttemptingDelivery = true;
-  const deliveryJob = currentResponseToDeliver; // Work with the current job
+  deliveryAttempts.isAttemptingDelivery = true;
+  const deliveryJob = deliveryAttempts.currentResponseToDeliver; // Work with the current job
 
   // Safe preview of question text for logging - handles questions of any length
   const previewText = deliveryJob.originalQuestionText.length > 30 ? `${deliveryJob.originalQuestionText.substring(0, 30)}...` : deliveryJob.originalQuestionText;
 
-  console.log(
-    `Content.js: Initiating delivery attempt #${deliveryJob.retries + 1} for conversation ${deliveryJob.conversationId} (Sender: ${
-      deliveryJob.sender
-    }, Original Q: "${previewText}")`
-  );
   let deliverySuccessful = false;
 
   try {
-    const elementToActuallyClick = deliveryJob.originalPreviewElement?.querySelector("div._a6ag._a6ah") || deliveryJob.originalPreviewElement;
+    let elementToActuallyClick = deliveryJob.originalPreviewElement?.querySelector("div._a6ag._a6ah") || deliveryJob.originalPreviewElement;
     let clickSuccessful = false;
+
+    const conversationContainerSelector = "div._4k8w";
+    const conversations = document.querySelectorAll(conversationContainerSelector);
+
+    // add targetConversation variable
+
+    for (const conv of conversations) {
+      const usernameElement = conv.querySelector(".xmi5d70");
+      if (usernameElement && usernameElement.textContent.trim() === deliveryJob.sender.trim()) {
+        elementToActuallyClick = conv;
+        break;
+      }
+    }
 
     if (!elementToActuallyClick || !document.body.contains(elementToActuallyClick)) {
       console.warn(
@@ -174,8 +204,8 @@ async function initiateResponseDeliverySequence() {
 
       deliveryJob.retries = MAX_DELIVERY_RETRIES;
 
-      currentResponseToDeliver = null;
-      isAttemptingDelivery = false;
+      deliveryAttempts.currentResponseToDeliver = null;
+      deliveryAttempts.isAttemptingDelivery = false;
       setTimeout(runAutomationCycle, 500); // Check for other messages
       return; // Critical: exit if element is bad
     } else {
@@ -202,8 +232,8 @@ async function initiateResponseDeliverySequence() {
           if (activeSenderName !== deliveryJob?.sender) {
             console.error(`Content.js: Delivery - CRITICAL MISMATCH! Clicked on preview for "${deliveryJob.sender}" but active chat is with "${activeSenderName}".`);
             console.error("Content.js: Delivery - Aborting to prevent sending response to the wrong person!");
-            currentResponseToDeliver = null;
-            isAttemptingDelivery = false;
+            deliveryAttempts.currentResponseToDeliver = null;
+            deliveryAttempts.isAttemptingDelivery = false;
             setTimeout(runAutomationCycle, 500);
             return; // Critical: abort delivery if sender doesn't match
           }
@@ -230,8 +260,8 @@ async function initiateResponseDeliverySequence() {
             if (!isFromCustomer) {
               console.warn(`Content.js: Delivery - Aborting response as the last message is not from the customer but from us/page.`);
               deliveryJob.retries = MAX_DELIVERY_RETRIES; // Prevent further retries
-              currentResponseToDeliver = null;
-              isAttemptingDelivery = false;
+              deliveryAttempts.currentResponseToDeliver = null;
+              deliveryAttempts.isAttemptingDelivery = false;
 
               // processedConversations Map has been removed
 
@@ -297,21 +327,21 @@ async function initiateResponseDeliverySequence() {
 
         if (sendButton && !sendButton.disabled) {
           if (window.isPartialAutomationEnabled) {
-            console.log("Content.js: Delivery - Partial Automation mode - NOT clicking send button. Message ready for manual review and sending.");
-            // Set isPartialChecking to false when message is added in draft but not submitted
-            isPartialChecking = false;
-            console.log("Content.js: Set isPartialChecking to false because message was added as draft.");
-
-            // Ensure the Next button is visible
+            setIsPartialChecking(false);
             addNextButton();
 
-            // The response is already in the input box, mark as successful since we've done what we need to
-            deliverySuccessful = true;
+            // Important: Clear delivery state to prevent looping
+            deliveryAttempts.currentResponseToDeliver = null;
+            deliveryAttempts.isAttemptingDelivery = false;
+
+            addProcessedMessage(deliveryJob);
+
+            return true; // Exit the function after setting up the draft
           } else {
             console.log("Content.js: Delivery - Send button found and enabled. Clicking.", sendButton);
             sendButton.click();
             // In full automation mode, always keep isPartialChecking true
-            isPartialChecking = true;
+            setIsPartialChecking(true);
             deliverySuccessful = true;
           }
         } else {
@@ -331,13 +361,14 @@ async function initiateResponseDeliverySequence() {
 
   // Post-delivery attempt logic
   if (deliverySuccessful) {
-    console.log(`Content.js: Successfully delivered response to ${deliveryJob.conversationId}.`);
-    if (deliveryJob.originalPreviewElement) {
-      deliveryJob.originalPreviewElement.classList.add("chatgpt-processed");
-      console.log(`Content.js: Marked conversation ${deliveryJob.conversationId} as 'chatgpt-processed'.`);
+    try {
+      addProcessedMessage(deliveryJob);
+    } catch (error) {
+      console.log(`messageKey did not added`, error);
     }
-    currentResponseToDeliver = null;
-    isAttemptingDelivery = false;
+
+    deliveryAttempts.currentResponseToDeliver = null;
+    deliveryAttempts.isAttemptingDelivery = false;
 
     // Don't clear from processedConversations on successful delivery
     // This prevents re-processing the same conversation multiple times
@@ -348,14 +379,14 @@ async function initiateResponseDeliverySequence() {
     deliveryJob.retries++;
     if (deliveryJob.retries < MAX_DELIVERY_RETRIES) {
       console.log(`Content.js: Scheduling retry for ${deliveryJob.conversationId}.`);
-      isAttemptingDelivery = false; // Allow the next attempt by resetting the flag
+      deliveryAttempts.isAttemptingDelivery = false; // Allow the next attempt by resetting the flag
       setTimeout(initiateResponseDeliverySequence, 5000); // Retry after 5 seconds
     } else {
       console.error(`Content.js: Max retries reached for ${deliveryJob.conversationId}. Giving up on this response.`);
       // Optional: Mark as 'chatgpt-delivery-failed' to avoid re-processing immediately
       // if (deliveryJob.originalPreviewElement) deliveryJob.originalPreviewElement.classList.add("chatgpt-delivery-failed");
-      currentResponseToDeliver = null;
-      isAttemptingDelivery = false;
+      deliveryAttempts.currentResponseToDeliver = null;
+      deliveryAttempts.isAttemptingDelivery = false;
       setTimeout(runAutomationCycle, 500); // Check for other messages
     }
   }

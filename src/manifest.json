@@ -3,7 +3,7 @@
   "name": "Meta Suite ChatGPT Bridge",
   "version": "2.1.0",
   "description": "Extracts questions from Meta Business Suite and gets answers from ChatGPT.",
-  "permissions": ["storage", "tabs", "scripting"],
+  "permissions": ["storage", "tabs", "scripting", "activeTab"],
   "host_permissions": ["https://business.facebook.com/latest/inbox/*", "https://*.meta.com/business/inbox/*", "https://chat.openai.com/*", "https://chatgpt.com/*"],
   "background": {
     "service_worker": "background/index.js",

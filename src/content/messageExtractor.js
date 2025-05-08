@@ -1,7 +1,13 @@
 // Functions for extracting messages and questions from Meta Business Suite
 
 // Cache for messages that were not found to be questions
-const notFoundMessages = new Set();
+
+// Local store for processed messages in the content script context
+const processedMessages = new Set();
+
+const processedMessageStore = {
+  processedMessages,
+};
 
 // Extract questions from the page - using EXACT same code from content.js
 function extractQuestions() {
@@ -48,7 +54,17 @@ function extractQuestions() {
       }
       messageText = messageDiv.textContent.trim();
 
-      if (messageText.toLowerCase().startsWith("you:")) {
+      if (messageText.toLowerCase().startsWith("you:") || messageText.toLowerCase().startsWith("you: ")) {
+        // click this conversation
+        console.log("starting with you");
+        const clickableElement = conv.querySelector("div._a6ag._a6ah");
+        try {
+          clickableElement.click();
+          console.log(`clicked unread...`);
+        } catch (error) {
+          console.log("Content.js: Error clicking conversation:", error);
+        }
+
         return;
       }
 
@@ -104,7 +120,11 @@ function extractQuestions() {
 
       if (messageText) {
         // Generate a unique key for this conversation + message
-        const messageKey = `${conversationId}:${messageText.slice(0, 50)}`;
+        const messageKey = `${conversationId}:${messageText?.trim()?.slice(0, 50)}`;
+        if (processedMessageStore.processedMessages.has(messageKey)) {
+          console.log(`Content.js: Message already processed, skipping: ${messageKey}`);
+          return;
+        }
 
         // Add an attribute to help identify the conversation
         conv.setAttribute("data-chatgpt-conversation-id", conversationId);
@@ -161,4 +181,4 @@ function processConversation(conversationId) {
   };
 }
 
-export { extractQuestions, processConversation, notFoundMessages };
+export { extractQuestions, processConversation, processedMessageStore };

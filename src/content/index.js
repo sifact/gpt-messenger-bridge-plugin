@@ -1,7 +1,6 @@
 // Content script for Meta Suite ChatGPT Bridge
-import { extractQuestions, processConversation, notFoundMessages } from "./messageExtractor.js";
-import { sendQuestionsToBackground, injectResponse } from "./messageHandler.js";
-import { startAutomation, stopAutomation, runAutomationCycle } from "./automation.js";
+
+import { startAutomation, stopAutomation, runAutomationCycle, clearCurrentResponse } from "./automation.js";
 
 console.log("Meta Suite ChatGPT Bridge content script loaded.");
 
@@ -62,6 +61,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     });
 
     sendResponse({ status: "Settings acknowledged by content script" });
+    return true;
+  } else if (request.action === "injectResponse") {
+    // Existing code...
+  } else if (request.action === "clearCurrentResponse") {
+    console.log("Content.js: Received clearCurrentResponse request");
+    clearCurrentResponse();
+    // Make sure we respond to the message
+    sendResponse({ status: "Current response cleared" });
     return true;
   }
   console.log("Content.js: Received unhandled message action:", request.action);

@@ -4,6 +4,7 @@ import { forwardInjectCommandToContentScript } from "./utils.js";
 async function handleGetAnswerFromChatGPT(request, sendResponse) {
   try {
     // Process all questions without duplicate checking
+
     const answer = await fetchChatGPTAnswer(request.question);
 
     // Truncate long answers in logs to keep console clean
